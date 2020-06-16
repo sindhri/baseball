@@ -1,0 +1,396 @@
+---
+title: "baseball"
+output: html_notebook
+description: create an SQL database using csv files on baseball games, also normalize the database
+---
+1. read the files
+
+```{r}
+library(readr)
+game_log <- read_csv("game_log.csv")
+park_codes <- read_csv("park_codes.csv")
+person_codes <- read_csv("person_codes.csv")
+team_codes <- read_csv("team_codes.csv")
+
+```
+2. short descriptions
+game_log has 161 columns, with detailed inforamtion of each game, including park_id, ids for each player, and team_id
+park_codes has park_id and name
+person_codes has id, name, when the person was a manager, coach, ump
+team_codes has team_id, league, start, end, city, nickname, franch_id, seq
+
+defensive position numbers:
+putouts, a fielder that makes someone out
+assists, catches the ball before throwing it to someone that gets a putout
+errors, missed the ball
+passed_balls, catchers who did not catch a legal ball
+double plays, had two outs
+triple plays, had three outs
+
+league:
+UA, Union Association (old and extinct)
+NL, National League (1 of 2 that makes up major leagues)
+PL, Player's League (short-lived in 19th centrury)
+NA, National Association (1871-1875)
+AA, American Association?
+AL, American League (1 of 2 that makes up major leagues)
+FL, Federal League (old major leagues, 1914)
+
+
+
+3. create mlb.db and write four tables
+```{r}
+library(RSQLite)
+conn <- dbConnect(SQLite(), 'mlb.db')
+
+dbWriteTable(conn = conn, name = "game_log", value = game_log, row_names = FALSE, header = TRUE)
+dbWriteTable(conn = conn, name = "park_codes", value = park_codes, row_names = FALSE, header = TRUE)
+dbWriteTable(conn = conn, name = "person_codes", value = person_codes, row_names = FALSE, header = TRUE)
+dbWriteTable(conn = conn, name = "team_codes", value = team_codes, row_names = FALSE, header = TRUE)
+
+```
+
+4. create game_id for game_log. column: h_name(3-digit), date (8 digit), number_of_game (1 digit)
+
+```{r}
+library(stringr)
+game_id <- str_c(game_log$h_name, game_log$date, game_log$number_of_game)
+head(game_id)
+query1 <- 'ALTER TABLE game_log ADD COLUMN game_id TEXT;'
+dbExecute(conn, query1)
+
+query2 <- 'UPDATE game_log SET game_id = (h_name || CAST(date As Int) || CAST(number_of_game As Int));'
+dbExecute(conn, query2)
+
+dbGetQuery(conn, 'SELECT * FROM game_log LIMIT 5;')
+dbGetQuery(conn, 'SELECT * FROM team_codes LIMIT 20;')
+dbGetQuery(conn, 'SELECT * FROM park_codes LIMIT 5;')
+dbGetQuery(conn, "SELECT DISTINCT(league) FROM park_codes;")
+dbListTables(conn)
+```
+ 5. create normalized tables
+```{r}
+query <- 'CREATE TABLE person (
+person_id TEXT,
+first_name TEXT,
+last_name TEXT,
+PRIMARY KEY (person_id)
+);'
+dbExecute(conn, query)
+
+query <- 'INSERT INTO person
+SELECT id person_id, 
+first first_name, 
+last last_name
+FROM person_codes;'
+
+dbExecute(conn, query)
+
+#dbExecute(conn, "DROP TABLE person")
+dbListTables(conn)
+
+dbGetQuery(conn, "SELECT * FROM person LIMIT 5;")
+
+query <- "CREATE TABLE park (
+park_id TEXT,
+name TEXT,
+nickname TEXT,
+city TEXT,
+state TEXT,
+notes TEXT,
+PRIMARY KEY (park_id)
+);"
+dbExecute(conn, query)
+query <-"INSERT INTO park
+SELECT park_id,
+name,
+aka nickname,
+city,
+state,
+notes
+FROM park_codes;
+"
+dbExecute(conn, query)
+dbGetQuery(conn, "SELECT * FROM park LIMIT 5;")
+
+
+#league table
+query <- "CREATE TABLE league (
+league_id TEXT,
+name TEXT,
+PRIMARY KEY (league_id)
+);"
+dbExecute(conn, query)
+
+query <- "INSERT INTO league VALUES 
+('NL', 'National Leagues'),
+('UA', 'Union Association'),
+('AL', 'American League'),
+('AA', 'American Association'),
+('FL', 'Federal League'),
+('PL', 'Player''s League');"
+
+dbExecute(conn, query)
+dbGetQuery(conn, "SELECT * FROM league;")
+
+dbWriteTable(conn = conn, name = "appearance_type", value = "appearance_type.csv", row_names = FALSE, header = TRUE)
+
+dbGetQuery(conn, "SELECT * FROM appearance_type;")
+dbGetQuery(conn, "SELECT COUNT(*) FROM appearance_type;")
+
+
+query <- "CREATE TABLE team (
+team_id TEXT,
+league_id TEXT,
+city TEXT,
+nickname TEXT,
+franch_id TEXT,
+PRIMARY KEY (team_id),
+FOREIGN KEY (league_id) REFERENCES league(league_id)
+);
+"
+
+#two team with the same team_id MIL
+#Their time do not overlap, same nickname, so same team
+query <- "UPDATE team_codes SET team_id = 'MIL2' WHERE (team_id = 'MIL') AND (league = 'NL');
+"
+dbExecute(conn, query)
+
+query <- "INSERT INTO team
+SELECT team_id,
+league league_id,
+city,
+nickname,
+franch_id
+FROM team_codes;
+"
+dbExecute(conn, query)
+dbGetQuery(conn, "SELECT * FROM team ORDER BY team_id;")
+
+query <- "CREATE TABLE game (
+game_id TEXT,
+date DATETIME,
+number_of_game INTEGER,
+park_id TEXT,
+length_outs INTEGER,
+day INTEGER,
+completion INTEGER,
+forfeit TEXT,
+protest INTEGER,
+attendance INTEGER,
+length_minutes INTEGER,
+additional_info TEXT,
+acquisition_info TEXT,
+PRIMARY KEY (game_id),
+FOREIGN KEY (park_id) REFERENCES park(park_id)
+)
+"
+dbExecute(conn, query)
+dbGetQuery(conn, "SELECT * FROM game_log LIMIT 1;")
+
+query <- "INSERT INTO game
+SELECT game_id,
+date,
+number_of_game,
+park_id,
+length_outs,
+day_night day,
+completion,
+forefeit forfeit,
+protest,
+attendance,
+length_minutes,
+additional_info,
+acquisition_info
+FROM game_log;
+"
+
+query <- "UPDATE game SET day = 1 WHERE day = 'D';"
+dbExecute(conn, query)
+query <- "UPDATE game SET day = 0 WHERE day = 'N';"
+query <- "SELECT COUNT(day) FROM game GROUP BY day"
+dbGetQuery(conn, query)
+dbGetQuery(conn, "SELECT * FROM game LIMIT 5;")
+
+
+query <- 'SELECT sql FROM sqlite_master
+WHERE name = "game_log"
+  AND type = "table";
+'
+temp <- dbGetQuery(conn, query)
+
+dbGetQuery(conn, "SELECT * FROM game_log LIMIT 5;")
+
+library(stringr)
+temp <- str_replace_all(temp,"[vh]_","")
+temp <- str_replace_all(temp,"\\n ","")
+
+query <- 
+"CREATE TABLE `team_appearance` (
+team_id TEXT,
+game_id TEXT,
+home INTEGER,
+`league_id` TEXT, `score` REAL, 
+`line_score` TEXT, `at_bats` REAL, `hits` REAL, `doubles` REAL, `triples` REAL, `homeruns` REAL, `rbi` REAL, `sacrifice_hits` REAL, `sacrifice_flies` REAL, `hit_by_pitch` REAL, 
+`walks` REAL, `intentional_walks` REAL, `strikeouts` REAL, `stolen_bases` REAL, `caught_stealing` REAL, 
+`grounded_into_double` REAL, `first_catcher_interference` INTEGER, `left_on_base` REAL, `pitchers_used` REAL, `individual_earned_runs` REAL, `team_earned_runs` REAL, `wild_pitches` REAL, `balks` REAL, `putouts` REAL, `assists` REAL, 
+`errors` REAL, `passed_balls` REAL, `double_plays` REAL, `triple_plays` REAL,
+PRIMARY KEY (team_id, game_id),
+FOREIGN KEY (league_id) REFERENCES league(league_id));"
+dbExecute(conn, query)
+
+
+query <- "INSERT INTO team_appearance
+SELECT h_name, game_id, 1 AS home, h_league, h_score, 
+h_line_score, h_at_bats,h_hits, h_doubles, h_triples, 
+h_homeruns, h_rbi, h_sacrifice_hits, h_sacrifice_flies, h_hit_by_pitch, 
+h_walks, h_intentional_walks, h_strikeouts, h_stolen_bases, h_caught_stealing, h_grounded_into_double, h_first_catcher_interference, h_left_on_base, h_pitchers_used, h_individual_earned_runs, 
+h_team_earned_runs, h_wild_pitches, h_balks, h_putouts, h_assists, 
+h_errors, h_passed_balls, h_double_plays, h_triple_plays FROM game_log
+UNION
+SELECT v_name, game_id, 0 AS home, v_league, v_score, v_line_score, v_at_bats,
+v_hits, v_doubles, v_triples, v_homeruns, v_rbi, v_sacrifice_hits, v_sacrifice_flies, v_hit_by_pitch, v_walks, v_intentional_walks, v_strikeouts, v_stolen_bases, v_caught_stealing, v_grounded_into_double, v_first_catcher_interference, v_left_on_base, v_pitchers_used, v_individual_earned_runs, 
+v_team_earned_runs, v_wild_pitches, v_balks, v_putouts, v_assists, v_errors, v_passed_balls, v_double_plays, v_triple_plays FROM game_log;
+"
+dbExecute(conn, query)
+dbGetQuery(conn, "SELECT * FROM team_appearance WHERE at_bats IS NOT NULL")
+
+
+#person_appearance
+query <- "CREATE TABLE person_appearance (
+appearance_id TEXT,
+person_id TEXT,
+team_id TEXT,
+game_id TEXT,
+appearance_type_id TEXT,
+PRIMARY KEY (appearance_id),
+FOREIGN KEY (person_id) REFERENCES person(person_id),
+FOREIGN KEY (team_id) REFERENCES team(team_id),
+FOREIGN KEY (game_id) REFERENCES game(game_id),
+FOREIGN KEY (appearance_type_id) REFERENCES appearance_type(appearance_type_id)
+);
+"
+dbExecute(conn, query)
+
+dbGetQuery(conn, "SELECT * FROM appearance_type;")
+dbGetQuery(conn, "SELECT DISTINCT(v_player_1_def_pos) FROM game_log ;")
+dbGetQuery(conn, "SELECT * FROM game_log WHERE saving_pitcher_id IS NOT NULL LIMIT 5 ;")
+
+query <- "INSERT INTO person_appearance (
+person_id,
+team_id,
+game_id,
+appearance_type_id
+)
+SELECT hp_umpire_id, NULL AS team_id, game_id, 'MM' FROM game_log 
+  WHERE hp_umpire_id IS NOT NULL
+UNION
+SELECT `1b_umpire_id`, NULL AS team_id, game_id, 'U1B' FROM game_log 
+  WHERE `1b_umpire_id` IS NOT NULL
+UNION
+SELECT `2b_umpire_id`, NULL AS team_id, game_id, 'U2B' FROM game_log 
+  WHERE `2b_umpire_id` IS NOT NULL
+UNION
+SELECT `3b_umpire_id`, NULL AS team_id, game_id, 'U3B' FROM game_log 
+  WHERE `3b_umpire_id` IS NOT NULL
+UNION
+SELECT `lf_umpire_id`, NULL AS team_id, game_id, 'ULF' FROM game_log 
+  WHERE `lf_umpire_id` IS NOT NULL
+UNION
+SELECT `rf_umpire_id`, NULL AS team_id, game_id, 'URF' FROM game_log 
+  WHERE `rf_umpire_id` IS NOT NULL
+UNION
+SELECT `v_manager_id`, v_name, game_id, 'MM' FROM game_log 
+  WHERE `v_manager_id` IS NOT NULL
+UNION
+SELECT `h_manager_id`, h_name, game_id, 'MM' FROM game_log 
+  WHERE `h_manager_id` IS NOT NULL
+UNION
+SELECT winning_pitcher_id, 
+        CASE 
+          WHEN h_score > v_score THEN h_name
+          ELSE v_name
+          END,
+       game_id, 'AWP' from game_log WHERE winning_pitcher_id IS NOT NULL
+UNION
+SELECT losing_pitcher_id,
+      CASE
+        WHEN h_score > v_score THEN v_name
+        ELSE h_name
+        END,
+      game_id, 'ALP' from game_log WHERE losing_pitcher_id IS NOT NULL
+ UNION
+SELECT saving_pitcher_id,
+       CASE
+        WHEN h_score > v_score THEN h_name
+        ELSE v_name
+        END,
+      game_id, 'ASP' from game_log WHERE saving_pitcher_id IS NOT NULL
+UNION
+SELECT winning_RBI_batter_id,
+       CASE
+        WHEN h_score > v_score THEN h_name
+        ELSE v_name
+        END,
+      game_id, 'AWB' from game_log WHERE winning_RBI_batter_id IS NOT NULL ;
+"
+dbExecute(conn, query)
+
+query <- "INSERT INTO person_appearance (
+person_id,
+team_id,
+game_id,
+appearance_type_id
+)
+SELECT v_starting_pitcher_id, v_name, game_id, 'PSP' from game_log WHERE v_starting_pitcher_id IS NOT NULL
+UNION
+SELECT h_starting_pitcher_id, h_name, game_id, 'PSP' from game_log WHERE h_starting_pitcher_id IS NOT NULL;
+"
+dbExecute(conn, query)
+
+for (letter in c("h", "v")) {
+  for (num in 1:9) {
+    template <- '
+      INSERT INTO person_appearance (
+          game_id,
+          team_id,
+          person_id,
+          appearance_type_id
+      ) 
+          SELECT
+              game_id,
+              %s_name,
+              %s_player_%f_id,
+              "O%f"
+          FROM game_log
+          WHERE %s_player_%f_id IS NOT NULL
+
+      UNION
+
+          SELECT
+              game_id,
+              %s_name,
+              %s_player_%f_id,
+              "D" || CAST(%s_player_%f_def_pos AS INT)
+          FROM game_log
+          WHERE %s_player_%f_id IS NOT NULL;
+    '
+    # replace all of the %s and %f with the correct letter number
+    template <- gsub("%s", letter, template, fixed = TRUE)
+    template <- gsub("%f", num, template, fixed = TRUE)
+
+    dbExecute(conn, template)
+  }
+}
+
+dbGetQuery(conn, "SELECT COUNT(*) FROM person_appearance")
+dbGetQuery(conn, "SELECT * FROM person_appearance LIMIT 5;")
+dbGetQuery(conn, "SELECT DISTINCT(h_player_1_def_pos) FROM game_log;")
+
+dbExecute(conn, "DROP TABLE game_log; DROP TABLE park_codes; DROP TABLE person_codes; DROP TABLE team_codes;")
+dbListTables(conn)
+
+dbDisconnect(conn)
+```
+ 
+ 
